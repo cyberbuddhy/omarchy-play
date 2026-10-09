@@ -1,0 +1,417 @@
+#!/bin/bash
+# play — play any artist, song, album, genre or mood from YouTube Music.
+#
+# Usage:
+#   play <anything>            play the top match, then keep going with related music
+#   play --pick <query>        choose from the top matches (related music follows)
+#   play --list <query>        list top matches without playing
+#   play --mood <mood>         bias toward long mixes (e.g. play --mood "chill evening")
+#   play --genre <genre>       same as --mood, for genres
+#   play --browser <query>     open the match in YouTube Music in the browser (autoplay)
+#   play --video <query>       play with video window (default is audio-only)
+#   play --prompt              ask what to play via the Omarchy menu, then play it
+#   play --stop                stop playback
+#   play --toggle              pause / resume playback
+#   play --next                skip to the next related track
+#   play --prev                back to the previous track
+#   play --now                 show what's currently playing
+#   play --help                this help
+#
+# Examples:
+#   play tame impala
+#   play "less i know the better"
+#   play "currents album"
+#   play lofi hip hop
+#   play --mood "rainy evening jazz"
+#
+# How it works: the query is resolved to the best YouTube match (the same
+# catalogue YouTube Music uses) with yt-dlp, then mpv plays that song followed
+# by its YouTube Mix — related music that keeps going after the request ends.
+# A new invocation replaces whatever is currently playing.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/play"
+SOCK="$STATE_DIR/mpv.sock"
+CURRENT="$STATE_DIR/current"
+PIDFILE="$STATE_DIR/mpv.pid"
+WATCHER_PIDFILE="$STATE_DIR/watcher.pid"
+LOG="$STATE_DIR/play.log"
+RESULT_COUNT=8
+
+mkdir -p "$STATE_DIR"
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+
+notify() {
+  local title="$1" body="${2:-}"
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "play" -i audio-x-generic "$title" "$body" 2>/dev/null || true
+  fi
+}
+
+urlencode() {
+  # jq is guaranteed on Omarchy; fall back to python3.
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$1" | jq -sRr @uri
+  else
+    python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))' <<<"$1"
+  fi
+}
+
+stop_playback() {
+  local stopped=0
+  if [[ -f $WATCHER_PIDFILE ]]; then
+    local wpid
+    wpid=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
+    [[ -n ${wpid:-} ]] && kill "$wpid" 2>/dev/null || true
+    rm -f "$WATCHER_PIDFILE"
+  fi
+  if [[ -S $SOCK ]] && command -v socat >/dev/null 2>&1; then
+    printf '{"command":["quit"]}\n' | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null || true
+    stopped=1
+  fi
+  if [[ -f $PIDFILE ]]; then
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [[ -n ${pid:-} ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      stopped=1
+    fi
+    rm -f "$PIDFILE"
+  fi
+  # Belt and braces: kill any mpv owned by a previous play invocation.
+  pkill -f "mpv.*$SOCK" 2>/dev/null || true
+  rm -f "$SOCK" "$CURRENT"
+  if ((stopped)); then
+    echo "Stopped."
+  else
+    echo "Nothing is playing."
+  fi
+  log "stop"
+}
+
+toggle_playback() {
+  if [[ ! -S $SOCK ]]; then
+    echo "Nothing is playing. Use: play <artist|song|album|genre|mood>"
+    return 1
+  fi
+  if command -v socat >/dev/null 2>&1; then
+    printf '{"command":["cycle","pause"]}\n' | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null || true
+    echo "Toggled pause."
+  else
+    echo "socat not found; cannot toggle." >&2
+    return 1
+  fi
+}
+
+show_now() {
+  if [[ -f $CURRENT ]]; then
+    local title id query
+    IFS=$'\t' read -r title id query <"$CURRENT"
+    echo "♪ $title"
+    echo "  https://music.youtube.com/watch?v=$id"
+  else
+    echo "Nothing is playing."
+  fi
+}
+
+# search <query> — print top matches as: id<TAB>title<TAB>uploader
+search() {
+  local query="$1"
+  timeout 40 yt-dlp --no-warnings --flat-playlist \
+    --print $'%(id)s\t%(title)s\t%(uploader)s' \
+    "ytsearch${RESULT_COUNT}:${query}" 2>/dev/null | grep -P '\S' || true
+}
+
+# best_of <results> — prefer official music sources (Topic/VEVO/Official),
+# otherwise take the first result. Reads lines from stdin, prints one line.
+best_of() {
+  local first="" preferred=""
+  while IFS=$'\t' read -r id title uploader; do
+    [[ -z ${id:-} ]] && continue
+    if [[ -z $first ]]; then
+      first="$id"$'\t'"$title"$'\t'"$uploader"
+    fi
+    if [[ -z $preferred && ${uploader:-} =~ [Tt]opic|VEVO|[Oo]fficial ]]; then
+      preferred="$id"$'\t'"$title"$'\t'"$uploader"
+    fi
+  done
+  printf '%s' "${preferred:-$first}"
+}
+
+resolve_best() {
+  search "$1" | best_of
+}
+
+list_results() {
+  local query="$1" i=0
+  while IFS=$'\t' read -r id title uploader; do
+    [[ -z ${id:-} ]] && continue
+    i=$((i + 1))
+    printf '%d. %s — %s\n   https://music.youtube.com/watch?v=%s\n' "$i" "$title" "${uploader:-unknown}" "$id"
+  done < <(search "$query")
+  ((i > 0)) || { echo "No matches for: $query" >&2; return 1; }
+}
+
+pick_result() {
+  local query="$1" results options=() ids=() line
+  results=$(search "$query")
+  [[ -n $results ]] || { echo "No matches for: $query" >&2; return 1; }
+  while IFS=$'\t' read -r id title uploader; do
+    [[ -z ${id:-} ]] && continue
+    ids+=("$id"$'\t'"$title"$'\t'"$uploader")
+    options+=("$title"$'\t'"${uploader:-unknown}")
+  done <<<"$results"
+  ((${#options[@]} > 0)) || { echo "No matches for: $query" >&2; return 1; }
+
+  local choice=""
+  if command -v omarchy-menu-select >/dev/null 2>&1 && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    choice=$(printf '%s\n' "${options[@]}" | omarchy-menu-select "Play" -- --width 520 2>/dev/null || true)
+    # omarchy-menu-select returns "<label><TAB><subtext>" when subtext exists.
+    local label="${choice%%$'\t'*}"
+    for line in "${ids[@]}"; do
+      if [[ ${line#*$'\t'} == "$label"$'\t'* || ${line#*$'\t'} == "$label" ]]; then
+        printf '%s' "$line" | head -c 2000
+        return 0
+      fi
+    done
+    # Fall through to first result if the round-trip missed.
+    printf '%s' "${ids[0]}"
+  else
+    echo "Top matches for: $query" >&2
+    list_results "$query" >&2
+    printf '%s' "${ids[0]}"
+  fi
+}
+
+# mpv_ipc <command-json> — query the running mpv, print the .data value.
+mpv_ipc() {
+  printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null \
+    | jq -r '.data // empty' 2>/dev/null || true
+}
+
+# queue_mix <mpv_pid> <seed_id> <start> <end> — resolve entries <start>..<end>
+# of the seed's YouTube Mix (related music) and append them to mpv's queue.
+# Aborts silently when the session moved on (new play / stop).
+queue_mix() {
+  local mpv_pid="$1" seed="$2" start="$3" end="$4" id added=0
+  timeout 120 yt-dlp --no-warnings --flat-playlist \
+    --playlist-start "$start" --playlist-end "$end" \
+    --print '%(id)s' \
+    "https://www.youtube.com/watch?v=${seed}&list=RD${seed}" 2>/dev/null \
+  | while read -r id; do
+      [[ -z ${id:-} || $id == NA ]] && continue
+      [[ -S $SOCK ]] || return 0
+      [[ $(cat "$PIDFILE" 2>/dev/null || true) == "$mpv_pid" ]] || return 0
+      printf '{"command":["loadfile","https://www.youtube.com/watch?v=%s","append"]}\n' "$id" \
+        | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null || true
+      added=$((added + 1))
+    done
+  log "queued mix seed=$seed items $start-$end"
+}
+
+# skip_track <mpv-command> <label>
+skip_track() {
+  local cmd="$1" label="$2"
+  if [[ ! -S $SOCK ]]; then
+    echo "Nothing is playing."
+    return 1
+  fi
+  printf '{"command":["%s"]}\n' "$cmd" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null || true
+  echo "$label"
+}
+
+# watcher <mpv_pid> <query> <seed_id>
+# Runs detached while the music plays. Fills mpv's queue with the seed's
+# related tracks (and tops it up before it runs dry — endless radio), and
+# keeps $CURRENT pointing at the track actually playing (silently, no
+# notifications). Clears $CURRENT when the music ends on its own.
+watcher() {
+  local mpv_pid="$1" query="$2" seed="$3"
+  echo $$ >"$WATCHER_PIDFILE"
+  local last="" gone=0 next=27
+  # The requested song is already playing; the queue fills in the background
+  # so related music never delays the start.
+  ( queue_mix "$mpv_pid" "$seed" 2 26 >>"$LOG" 2>&1 ) &
+  while true; do
+    sleep 10
+    # Another session took over — get out of the way.
+    if [[ -f $PIDFILE ]] && [[ $(cat "$PIDFILE" 2>/dev/null || true) != "$mpv_pid" ]]; then
+      return 0
+    fi
+    if [[ ! -S $SOCK ]] || ! kill -0 "$mpv_pid" 2>/dev/null; then
+      gone=$((gone + 1))
+      ((gone >= 2)) || continue
+      # Music ended on its own (or was stopped) — clear now-playing if it's ours.
+      if [[ ! -f $PIDFILE ]] || [[ $(cat "$PIDFILE" 2>/dev/null || true) == "$mpv_pid" ]]; then
+        rm -f "$CURRENT" "$PIDFILE"
+      fi
+      return 0
+    fi
+    gone=0
+    # Top up the queue before it runs dry.
+    local pos count
+    pos=$(mpv_ipc '{"command":["get_property","playlist-pos"]}')
+    count=$(mpv_ipc '{"command":["get_property","playlist-count"]}')
+    if [[ ${pos:-} =~ ^[0-9]+$ && ${count:-} =~ ^[0-9]+$ ]] && ((count > 1 && pos >= count - 3 && next <= 101)); then
+      ( queue_mix "$mpv_pid" "$seed" "$next" "$((next + 24))" >>"$LOG" 2>&1 ) &
+      next=$((next + 25))
+    fi
+    local title path id
+    title=$(mpv_ipc '{"command":["get_property","media-title"]}')
+    [[ -z ${title:-} || $title == http* || $title == "$last" ]] && continue
+    last="$title"
+    id=""
+    path=$(mpv_ipc '{"command":["get_property","path"]}')
+    if [[ ${path:-} =~ v=([A-Za-z0-9_-]{11}) ]]; then
+      id="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\t%s\t%s\n' "$title" "$id" "$query" >"$CURRENT"
+    log "now playing title=$title id=${id:-?}"
+  done
+}
+
+# launch_mpv <url> <video:0|1> — start detached mpv on the IPC socket.
+launch_mpv() {
+  local url="$1" video="$2"
+  rm -f "$SOCK"
+  local -a mpv_args=(--input-ipc-server="$SOCK" "--title=\${media-title} — play"
+    --ytdl-format='bestaudio[ext=m4a]/bestaudio/best' --no-terminal)
+  if ((video)); then
+    mpv_args+=(--force-window=yes)
+  else
+    mpv_args+=(--no-video)
+  fi
+  setsid nohup mpv "${mpv_args[@]}" "$url" >>"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+}
+
+play_id() {
+  local id="$1" title="$2" uploader="$3" query="$4" video="${5:-0}"
+  local url="https://www.youtube.com/watch?v=$id"
+  stop_playback >/dev/null 2>&1 || true
+  launch_mpv "$url" "$video"
+  local mpv_pid
+  mpv_pid=$(cat "$PIDFILE")
+  printf '%s\t%s\t%s\n' "$title" "$id" "$query" >"$CURRENT"
+  log "play id=$id title=$title query=$query"
+  notify "▶ $title" "${uploader:-YouTube Music} — related music follows"
+  echo "▶ $title — ${uploader:-unknown} (related music follows)"
+  echo "  https://music.youtube.com/watch?v=$id"
+  setsid nohup "${BASH_SOURCE[0]}" __watch "$mpv_pid" "$query" "$id" >>"$LOG" 2>&1 &
+  echo $! >"$WATCHER_PIDFILE"
+}
+
+open_in_browser() {
+  local query="$1" line id title
+  line=$(resolve_best "$query")
+  local browser_url
+  if [[ -n $line ]]; then
+    IFS=$'\t' read -r id title _ <<<"$line"
+    browser_url="https://music.youtube.com/watch?v=$id&list=RD$id&autoplay=1"
+    printf '%s\t%s\t%s\n' "$title" "$id" "$query" >"$CURRENT"
+    log "browser id=$id title=$title query=$query"
+  else
+    browser_url="https://music.youtube.com/search?q=$(urlencode "$query")"
+    log "browser search query=$query"
+  fi
+  if command -v omarchy-launch-browser >/dev/null 2>&1; then
+    setsid omarchy-launch-browser "$browser_url" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then
+    setsid xdg-open "$browser_url" >/dev/null 2>&1 &
+  else
+    echo "$browser_url"
+  fi
+  echo "▶ ${title:-$query}"
+  echo "  $browser_url"
+}
+
+prompt_query() {
+  local q=""
+  if command -v omarchy-menu-input >/dev/null 2>&1 && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    q=$(omarchy-menu-input "Play artist, song, album, genre or mood" --width 480 2>/dev/null || true)
+  else
+    read -rp "Play artist, song, album, genre or mood: " q || true
+  fi
+  printf '%s' "$q" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+usage() {
+  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+  # Internal entrypoint: detached per-track watcher (see play_id).
+  if [[ ${1:-} == __watch ]]; then
+    shift
+    watcher "$@"
+    return 0
+  fi
+  local mode="play" video=0 query="" pick=0 list=0
+  while (($# > 0)); do
+    case "$1" in
+      -h | --help | help) usage; exit 0 ;;
+      -s | --stop | stop) stop_playback; exit 0 ;;
+      -t | --toggle | --pause | --resume | toggle | pause) toggle_playback; exit 0 ;;
+      --next | next | skip) skip_track playlist-next "Skipped to next track."; exit 0 ;;
+      --prev | prev) skip_track playlist-prev "Back to previous track."; exit 0 ;;
+      -n | --now | --status | status) show_now; exit 0 ;;
+      -p | --prompt | --ask) mode="prompt"; shift ;;
+      --pick | --choose | --select) pick=1; shift ;;
+      -l | --list) list=1; shift ;;
+      -b | --browser | --web) mode="browser"; shift ;;
+      -v | --video) video=1; shift ;;
+      -m | --mood | --genre | --vibe) mode="mood"; shift ;;
+      --) shift; query="$*"; break ;;
+      -*) echo "Unknown option: $1 (see play --help)" >&2; exit 2 ;;
+      *) query="$query $1"; shift ;;
+    esac
+  done
+  query=$(printf '%s' "${query:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  case "$mode" in
+    prompt)
+      query=$(prompt_query)
+      [[ -n $query ]] || { echo "Cancelled."; exit 1; }
+      ;;
+    mood)
+      [[ -n $query ]] || query=$(prompt_query)
+      [[ -n $query ]] || { echo "Cancelled."; exit 1; }
+      # Bias music search toward long mixes / radio for moods & genres.
+      query="$query mix"
+      ;;
+    browser)
+      [[ -n $query ]] || query=$(prompt_query)
+      [[ -n $query ]] || { echo "Cancelled."; exit 1; }
+      open_in_browser "$query"
+      exit 0
+      ;;
+  esac
+
+  if [[ -z $query ]]; then
+    query=$(prompt_query)
+    [[ -n $query ]] || { usage >&2; exit 2; }
+  fi
+
+  if ((list)); then
+    list_results "$query"
+    exit 0
+  fi
+
+  local line
+  if ((pick)); then
+    line=$(pick_result "$query")
+  else
+    line=$(resolve_best "$query")
+  fi
+  if [[ -z ${line:-} ]]; then
+    echo "No matches for: $query" >&2
+    exit 1
+  fi
+  local id title uploader
+  IFS=$'\t' read -r id title uploader <<<"$line"
+  play_id "$id" "$title" "${uploader:-}" "$query" "$video"
+}
+
+main "$@"
