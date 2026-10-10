@@ -10,6 +10,7 @@
 #   play --browser <query>     open the match in YouTube Music in the browser (autoplay)
 #   play --video <query>       play with video window (default is audio-only)
 #   play --prompt              ask what to play via the Omarchy menu, then play it
+#   play --provider <name> <query>  play via a provider: ytmusic (free, default) or spotify
 #   play --stop                stop playback
 #   play --toggle              pause / resume playback
 #   play --next                skip to the next related track
@@ -23,6 +24,11 @@
 #   play "currents album"
 #   play lofi hip hop
 #   play --mood "rainy evening jazz"
+#   play --provider spotify tame impala
+#
+# Providers: ytmusic is free and needs nothing but the Requirements below.
+# Spotify opens the match in your Spotify app (or the web player) and its
+# buttons drive the Spotify client via playerctl when installed.
 #
 # How it works: the query is resolved to the best YouTube match (the same
 # catalogue YouTube Music uses) with yt-dlp, then mpv plays that song followed
@@ -37,6 +43,9 @@ CURRENT="$STATE_DIR/current"
 PIDFILE="$STATE_DIR/mpv.pid"
 WATCHER_PIDFILE="$STATE_DIR/watcher.pid"
 LOG="$STATE_DIR/play.log"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/play"
+PROVIDER_FILE="$CONFIG_DIR/provider"
+PROVIDER_OVERRIDE=""
 RESULT_COUNT=8
 
 mkdir -p "$STATE_DIR"
@@ -59,8 +68,74 @@ urlencode() {
   fi
 }
 
+# current_provider — CLI flag wins, then ~/.config/play/provider, then ytmusic.
+current_provider() {
+  if [[ -n ${PROVIDER_OVERRIDE:-} ]]; then
+    printf '%s' "$PROVIDER_OVERRIDE"
+  elif [[ -f $PROVIDER_FILE ]]; then
+    local p
+    p=$(tr '[:upper:]' '[:lower:]' <"$PROVIDER_FILE" | tr -d '[:space:]')
+    [[ $p == spotify ]] && printf 'spotify' || printf 'ytmusic'
+  else
+    printf 'ytmusic'
+  fi
+}
+
+normalize_provider() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    ytmusic | yt | youtube | youtube-music) printf 'ytmusic' ;;
+    spotify | sp) printf 'spotify' ;;
+    *)
+      echo "Unknown provider: ${1:-} (use ytmusic or spotify)" >&2
+      return 1
+      ;;
+  esac
+}
+
+# play_spotify <query> — open the query in Spotify and remember it as current.
+# Needs the Spotify desktop app or a browser; controls use playerctl.
+play_spotify() {
+  local query="$1"
+  local search_url="https://open.spotify.com/search/$(urlencode "$query")"
+  stop_playback >/dev/null 2>&1 || true
+  if command -v omarchy-launch-browser >/dev/null 2>&1; then
+    setsid omarchy-launch-browser "$search_url" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then
+    setsid xdg-open "$search_url" >/dev/null 2>&1 &
+  else
+    echo "$search_url"
+  fi
+  printf '%s\tspotify\t%s\n' "$query" "$query" >"$CURRENT"
+  log "spotify query=$query"
+  notify "▶ $query" "Opened in Spotify — press play there"
+  echo "▶ $query (opened in Spotify)"
+  echo "  $search_url"
+}
+
+# spotify_ctl <playerctl-args...> — drive the Spotify client, if present.
+spotify_ctl() {
+  if ! command -v playerctl >/dev/null 2>&1; then
+    echo "playerctl not found; install it for Spotify controls (omarchy pkg add playerctl)." >&2
+    return 1
+  fi
+  if playerctl --player=spotify "$@" >/dev/null 2>&1; then
+    echo "Done."
+    return 0
+  fi
+  if playerctl "$@" >/dev/null 2>&1; then
+    echo "Done."
+    return 0
+  fi
+  echo "No Spotify player found. Open Spotify first." >&2
+  return 1
+}
+
 stop_playback() {
   local stopped=0
+  if [[ $(current_provider) == spotify ]] && command -v playerctl >/dev/null 2>&1; then
+    playerctl --player=spotify pause >/dev/null 2>&1 || playerctl pause >/dev/null 2>&1 || true
+    stopped=1
+  fi
   if [[ -f $WATCHER_PIDFILE ]]; then
     local wpid
     wpid=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
@@ -92,6 +167,10 @@ stop_playback() {
 }
 
 toggle_playback() {
+  if [[ $(current_provider) == spotify ]]; then
+    spotify_ctl play-pause
+    return $?
+  fi
   if [[ ! -S $SOCK ]]; then
     echo "Nothing is playing. Use: play <artist|song|album|genre|mood>"
     return 1
@@ -110,7 +189,13 @@ show_now() {
     local title id query
     IFS=$'\t' read -r title id query <"$CURRENT"
     echo "♪ $title"
-    echo "  https://music.youtube.com/watch?v=$id"
+    if [[ ${id:-} == spotify ]]; then
+      echo "  $query (Spotify)"
+    elif [[ -n ${id:-} ]]; then
+      echo "  https://music.youtube.com/watch?v=$id"
+    elif [[ -n ${query:-} ]]; then
+      echo "  $query"
+    fi
   else
     echo "Nothing is playing."
   fi
@@ -214,6 +299,13 @@ queue_mix() {
 # skip_track <mpv-command> <label>
 skip_track() {
   local cmd="$1" label="$2"
+  if [[ $(current_provider) == spotify ]]; then
+    case "$cmd" in
+      playlist-next) spotify_ctl next ;;
+      playlist-prev) spotify_ctl previous ;;
+    esac
+    return $?
+  fi
   if [[ ! -S $SOCK ]]; then
     echo "Nothing is playing."
     return 1
@@ -358,6 +450,10 @@ main() {
       --prev | prev) skip_track playlist-prev "Back to previous track."; exit 0 ;;
       -n | --now | --status | status) show_now; exit 0 ;;
       -p | --prompt | --ask) mode="prompt"; shift ;;
+      --provider | -P)
+        PROVIDER_OVERRIDE=$(normalize_provider "${2:-}") || exit 2
+        shift 2
+        ;;
       --pick | --choose | --select) pick=1; shift ;;
       -l | --list) list=1; shift ;;
       -b | --browser | --web) mode="browser"; shift ;;
@@ -392,6 +488,16 @@ main() {
   if [[ -z $query ]]; then
     query=$(prompt_query)
     [[ -n $query ]] || { usage >&2; exit 2; }
+  fi
+
+  if [[ $(current_provider) == spotify && $mode != browser ]]; then
+    # --list/--pick search the YouTube catalogue, so they stay on ytmusic.
+    if ((list || pick)); then
+      PROVIDER_OVERRIDE=ytmusic
+    else
+      play_spotify "$query"
+      exit 0
+    fi
   fi
 
   if ((list)); then

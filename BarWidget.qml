@@ -6,44 +6,66 @@ BarWidget {
   id: root
   moduleName: "io.github.cyberbuddhy.omarchy-play"
 
-  // No details panel: this widget drives the `play` CLI directly.
-  // `opened` stays false; open()/toggle() summon the play prompt so
-  // `omarchy-shell shell summon` routes somewhere useful.
-  readonly property bool opened: false
-  readonly property bool popoutSwitchClosing: false
-
-  function prompt() {
-    if (root.bar) root.bar.run("play --prompt")
-  }
+  readonly property bool opened: panelLoader.item
+    ? panelLoader.item.opened === true
+    : false
+  readonly property bool popoutSwitchClosing: panelLoader.item
+    ? panelLoader.item.popoutSwitchClosing === true
+    : false
 
   function open() {
-    root.prompt()
+    if (panelLoader.item) panelLoader.item.open()
   }
 
   function close() {
+    if (panelLoader.item) panelLoader.item.close()
   }
 
   function toggle() {
-    root.prompt()
+    if (panelLoader.item) panelLoader.item.toggle()
   }
 
   function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
+
+  function injectPanel() {
+    if (!panelLoader.item) return
+    panelLoader.item.bar = root.bar
+    panelLoader.item.anchorItem = button
+    panelLoader.item.hostWidget = root
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  onBarChanged: injectPanel()
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: ""
-    tooltipText: "Play music (left: prompt, right: pause/resume, middle: stop)"
+    text: ""
+    tooltipText: "Play music"
     onPressed: function(buttonCode) {
-      if (!root.bar) return
-      if (buttonCode === Qt.RightButton) root.bar.run("play --toggle")
-      else if (buttonCode === Qt.MiddleButton) root.bar.run("play --stop")
-      else root.prompt()
+      if (buttonCode === Qt.RightButton) {
+        if (root.bar) root.bar.run("play --toggle")
+      } else if (buttonCode === Qt.MiddleButton) {
+        if (root.bar) root.bar.run("play --stop")
+      } else {
+        root.toggle()
+      }
     }
   }
 }

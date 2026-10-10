@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.cyberbuddhy.omarchy-play",
   "name": "Play",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "cyberbuddhy",
   "license": "MIT",
-  "description": "Play any artist, song, album, genre or mood from YouTube Music via the Omarchy bar.",
+  "description": "Search and play any artist, song, album, genre or mood (YouTube Music or Spotify) from a bar dropdown panel.",
   "kinds": [
     "bar-widget"
   ],
