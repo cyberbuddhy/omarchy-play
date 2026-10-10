@@ -49,6 +49,18 @@ Optional for the nice pop-ups (already on Omarchy):
 
 ## Install
 
+### As an Omarchy plugin (recommended)
+
+```bash
+omarchy plugin add https://github.com/cyberbuddhy/omarchy-play.git --enable
+```
+
+This adds a  button to your bar: left-click asks what to play,
+right-click pauses/resumes, middle-click stops. The widget calls the `play`
+script below, so the requirements still apply.
+
+### As a plain script
+
 ```bash
 git clone https://github.com/cyberbuddhy/omarchy-play.git
 cd omarchy-play
@@ -65,6 +77,14 @@ Update later:
 cd omarchy-play
 git pull
 cp play ~/.local/bin/play
+```
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.cyberbuddhy.omarchy-play
+rm ~/.local/bin/play
+play --stop  # clears state in ~/.local/state/play/
 ```
 
 ## Use
@@ -110,7 +130,9 @@ Or add a menu entry in `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 
 ## Files in this repo
 
-- `play` — the whole player (one bash script, ~417 lines)
+- `play` — the whole player (one bash script)
+- `manifest.json` — Omarchy plugin manifest (bar-widget)
+- `BarWidget.qml` — bar button driving the `play` script
 - `README.md` — this file
 - `LICENSE` — MIT
 

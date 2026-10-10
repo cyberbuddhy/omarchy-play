@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cyberbuddhy.omarchy-play",
+  "name": "Play",
+  "version": "1.0.0",
+  "author": "cyberbuddhy",
+  "license": "MIT",
+  "description": "Play any artist, song, album, genre or mood from YouTube Music via the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Play",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
