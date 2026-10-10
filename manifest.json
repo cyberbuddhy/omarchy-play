@@ -2,20 +2,14 @@
   "schemaVersion": 1,
   "id": "io.github.cyberbuddhy.omarchy-play",
   "name": "Play",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "cyberbuddhy",
   "license": "MIT",
-  "description": "Search and play any artist, song, album, genre or mood (YouTube Music or Spotify) from a bar dropdown panel.",
+  "description": "Play any artist, song, album, genre or mood from YouTube Music or Spotify. Zero setup: enabling installs everything and adds Super+Space entries.",
   "kinds": [
-    "bar-widget"
+    "service"
   ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
-  },
-  "barWidget": {
-    "displayName": "Play",
-    "category": "Media",
-    "allowMultiple": false,
-    "defaultSection": "right"
+    "service": "Service.qml"
   }
 }

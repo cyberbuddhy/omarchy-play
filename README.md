@@ -1,6 +1,6 @@
 # omarchy-play
 
-Play any artist, song, album, genre, or mood from YouTube Music — from your terminal.
+Play any artist, song, album, genre, or mood from YouTube Music or Spotify.
 
 Type `play tame impala` and music starts. It keeps going with related music after, like radio.
 
@@ -50,37 +50,18 @@ Optional for the nice pop-ups (already on Omarchy):
 
 ## Install
 
-### Copy-paste setup (~2 min, everything working)
-
-```bash
-omarchy plugin add https://github.com/cyberbuddhy/omarchy-play.git --enable
-omarchy bar put io.github.cyberbuddhy.omarchy-play --section right
-git clone https://github.com/cyberbuddhy/omarchy-play.git && cd omarchy-play && ./install.sh
-```
-
-What each line does:
-
-1. Adds the plugin and enables it (bar button + dropdown panel work immediately).
-2. Guarantees the button is placed on the bar (`add --enable` sometimes leaves
-   it enabled-but-unplaced; `bar put` is safe to re-run).
-3. Installs the `play` binary, adds Super+Space `Play music` / `Stop music`
-   entries, and asks the provider (YouTube Music free default). Safe to re-run.
-
-### As an Omarchy plugin only
+One command. Nothing else to run — enabling the plugin installs the `play`
+binary, adds the Super+Space `Play music` / `Stop music` entries, and picks
+the free default provider (YouTube Music):
 
 ```bash
 omarchy plugin add https://github.com/cyberbuddhy/omarchy-play.git --enable
 ```
 
-This adds a  button to your bar — no configuration needed (if the button
-does not show, run `omarchy bar put io.github.cyberbuddhy.omarchy-play --section right`):
+Then hit Super+Space, type `Play music`, hit Enter, type what you want, hit
+Enter. Music starts.
 
-- Left-click opens the dropdown panel: search bar (type, hit Enter, it plays),
-  ⏮ ⏯ ⏭ ⏹ controls, now-playing title, and a provider dropdown.
-- Right-click pauses/resumes, middle-click stops.
-
-Then, for the `play` command itself, Super+Space entries, and a guided
-provider choice, run the installer once:
+### Manual setup (only if you skip the plugin)
 
 ```bash
 git clone https://github.com/cyberbuddhy/omarchy-play.git
@@ -88,9 +69,8 @@ cd omarchy-play
 ./install.sh
 ```
 
-`install.sh` copies `play` to `~/.local/bin`, merges `Play music` / `Stop music`
-entries into your Super+Space menu (nothing else in that file is touched), and
-asks which provider to use — free first, paid second. Safe to re-run.
+`install.sh` does the same three steps the plugin service runs automatically
+(binary, menu entries, provider choice with free options first). Safe to re-run.
 
 ### As a plain script
 
@@ -116,13 +96,18 @@ cp play ~/.local/bin/play
 
 ```bash
 omarchy plugin remove io.github.cyberbuddhy.omarchy-play
-rm ~/.local/bin/play
-play --stop  # clears state in ~/.local/state/play/
 ```
 
-Also delete the `music.play` / `music.stop` keys from
-`~/.config/omarchy/extensions/omarchy-menu.jsonc` if you ran `install.sh`,
-and optionally `rm -rf ~/.config/play ~/.local/state/play`.
+Then clean up what the setup installed (the plugin cannot remove these itself):
+
+```bash
+play --stop  # stops music, clears state in ~/.local/state/play/
+rm ~/.local/bin/play
+rm -rf ~/.config/play ~/.local/state/play
+```
+
+Also delete the `music`, `music.play`, `music.stop` keys from
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`.
 
 ## Providers
 
@@ -131,9 +116,8 @@ and optionally `rm -rf ~/.config/play ~/.local/state/play`.
 | YouTube Music (default) | Free | `yt-dlp` + `mpv`, endless related-music radio | Full: ⏯ ⏭ ⏮ ⏹ |
 | Spotify | Paid account + app or browser | Opens the match in Spotify (app via `omarchy-launch-browser`, else web player) | Via `playerctl` (`omarchy pkg add playerctl`) |
 
-Switch anytime: the provider dropdown in the bar panel, `./install.sh` again,
-`play --provider spotify <query>` for one shot, or
-`echo spotify > ~/.config/play/provider`.
+Switch anytime: `./install.sh` again, `play --provider spotify <query>` for
+one shot, or `echo spotify > ~/.config/play/provider`.
 
 ## Use
 
@@ -179,10 +163,10 @@ Or add a menu entry in `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 ## Files in this repo
 
 - `play` — the whole player (one bash script, YouTube Music + Spotify)
-- `manifest.json` — Omarchy plugin manifest (bar-widget)
-- `BarWidget.qml` — bar button driving the panel
-- `Panel.qml` — dropdown panel: search bar, controls, provider picker
-- `install.sh` — one-shot setup: binary, Super+Space entries, provider choice
+- `manifest.json` — Omarchy plugin manifest (service)
+- `Service.qml` — headless service; runs `setup.sh` on load
+- `setup.sh` — automatic setup: binary, Super+Space entries, default provider
+- `install.sh` — same setup as a manual fallback, plus provider choice
 - `README.md` — this file
 - `LICENSE` — MIT
 
