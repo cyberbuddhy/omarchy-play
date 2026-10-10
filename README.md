@@ -50,13 +50,30 @@ Optional for the nice pop-ups (already on Omarchy):
 
 ## Install
 
-### As an Omarchy plugin (recommended)
+### Copy-paste setup (~2 min, everything working)
+
+```bash
+omarchy plugin add https://github.com/cyberbuddhy/omarchy-play.git --enable
+omarchy bar put io.github.cyberbuddhy.omarchy-play --section right
+git clone https://github.com/cyberbuddhy/omarchy-play.git && cd omarchy-play && ./install.sh
+```
+
+What each line does:
+
+1. Adds the plugin and enables it (bar button + dropdown panel work immediately).
+2. Guarantees the button is placed on the bar (`add --enable` sometimes leaves
+   it enabled-but-unplaced; `bar put` is safe to re-run).
+3. Installs the `play` binary, adds Super+Space `Play music` / `Stop music`
+   entries, and asks the provider (YouTube Music free default). Safe to re-run.
+
+### As an Omarchy plugin only
 
 ```bash
 omarchy plugin add https://github.com/cyberbuddhy/omarchy-play.git --enable
 ```
 
-This adds a  button to your bar — no configuration needed:
+This adds a  button to your bar — no configuration needed (if the button
+does not show, run `omarchy bar put io.github.cyberbuddhy.omarchy-play --section right`):
 
 - Left-click opens the dropdown panel: search bar (type, hit Enter, it plays),
   ⏮ ⏯ ⏭ ⏹ controls, now-playing title, and a provider dropdown.
